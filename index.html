@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>OCR Offline (Estável)</title>
+  <style>
+    :root{
+      color-scheme: dark;
+      --bg:#0f172a;
+      --panel:#111827;
+      --panel-strong:#020617;
+      --border:#334155;
+      --text:#e5e7eb;
+      --muted:#94a3b8;
+      --accent:#22c55e;
+      --info:#60a5fa;
+      --warn:#facc15;
+    }
+    *{box-sizing:border-box}
+    body{
+      font-family:Arial,Helvetica,sans-serif;
+      background:var(--bg);
+      color:var(--text);
+      margin:0;
+      padding:20px;
+    }
+    h1{margin:0 0 6px 0}
+    p{margin:0 0 14px 0;color:#cbd5e1}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    input[type=file]{
+      padding:10px;
+      border-radius:10px;
+      border:1px dashed var(--border);
+      background:var(--panel-strong);
+      color:#cbd5e1;
+    }
+    button{
+      padding:10px 16px;
+      background:var(--accent);
+      border:none;
+      border-radius:10px;
+      font-weight:700;
+      cursor:pointer;
+    }
+    button:disabled{opacity:.6;cursor:not-allowed}
+    #status{
+      margin-top:12px;
+      padding:10px 12px;
+      border-radius:10px;
+      background:var(--panel-strong);
+      border:1px solid var(--border);
+      color:var(--warn);
+      display:inline-block;
+    }
+    .card{
+      background:var(--panel);
+      padding:16px;
+      border-radius:14px;
+      margin-top:16px;
+      border:1px solid #1f2937;
+    }
+    .card h3{margin:0 0 10px 0;color:var(--info)}
+    pre{
+      background:var(--panel-strong);
+      padding:12px;
+      border-radius:10px;
+      color:#38bdf8;
+      white-space:pre-wrap;
+      min-height:160px;
+      line-height:1.6;
+      border:1px solid var(--border);
+    }
+    .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+    .box{
+      background:var(--panel-strong);
+      padding:12px;
+      border-radius:12px;
+      border:1px solid var(--border);
+    }
+    .box span{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+    .box strong{display:block;margin-top:4px;font-size:16px;color:#f8fafc}
+    .wide{grid-column:span 2}
+    .hint{font-size:12px;color:var(--muted);margin-top:8px}
+  </style>
+</head>
+<body>
+  <h1>OCR Offline (Estável)</h1>
+  <p><strong>IMPORTANTE:</strong> abrir via <code>http://localhost</code> (python http.server).</p>
+
+  <div class="row">
+    <input type="file" id="img" accept="image/*" />
+    <button id="btn" type="button">Extrair dados</button>
+  </div>
+  <div id="status">Aguardando imagem…</div>
+  <div class="hint">Dica: foto nítida, sem reflexo, comprovante preenchendo a imagem.</div>
+
+  <div class="card">
+    <h3>Texto OCR</h3>
+    <pre id="texto"></pre>
+  </div>
+
+  <div class="card">
+    <h3>Dados extraídos</h3>
+    <div class="grid">
+      <div class="box"><span>Serial</span><strong id="serial">-</strong></div>
+      <div class="box"><span>Nome</span><strong id="nome">-</strong></div>
+      <div class="box"><span>Crédito</span><strong id="credito">R$ 0,00</strong></div>
+      <div class="box"><span>Débito</span><strong id="debito">R$ 0,00</strong></div>
+      <div class="box"><span>Pix</span><strong id="pix">R$ 0,00</strong></div>
+      <div class="box"><span>Dinheiro</span><strong id="dinheiro">R$ 0,00</strong></div>
+      <div class="box wide"><span>Total</span><strong id="total">R$ 0,00</strong></div>
+    </div>
+  </div>
+
+  <!-- Arquivos locais na mesma pasta: tesseract.min.js + worker.min.js + lang/por.traineddata -->
+  <script src="tesseract.min.js"></script>
+  <script>
+    (function(){
+      const btn = document.getElementById('btn');
+      const statusEl = document.getElementById('status');
+      const textoEl = document.getElementById('texto');
+
+      const elSerial = document.getElementById('serial');
+      const elNome = document.getElementById('nome');
+      const elCredito = document.getElementById('credito');
+      const elDebito = document.getElementById('debito');
+      const elPix = document.getElementById('pix');
+      const elDinheiro = document.getElementById('dinheiro');
+      const elTotal = document.getElementById('total');
+
+      function setStatus(text){
+        statusEl.textContent = text;
+      }
+
+      function stripAccents(text){
+        return (text || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+      }
+
+      function normLine(text){
+        let x = stripAccents(text).toUpperCase();
+        x = x.replace(/\s+/g, ' ').trim();
+        x = x.replace(/SERIAI/g, 'SERIAL');
+        x = x.replace(/PLX/g, 'PIX').replace(/P1X/g, 'PIX').replace(/PI X/g, 'PIX');
+        return x;
+      }
+
+      async function preprocessImage(file){
+        const bmp = await createImageBitmap(file);
+        const scale = 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.floor(bmp.width * scale));
+        canvas.height = Math.max(1, Math.floor(bmp.height * scale));
+        const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = img.data;
+
+        const contrast = 18;
+        const factor = (259 * (contrast + 255)) / (255 * (259 - contrast));
+
+        for(let i = 0; i < d.length; i += 4){
+          const y0 = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          const y = factor * (y0 - 128) + 128;
+          const v = Math.max(0, Math.min(255, y));
+          d[i] = d[i + 1] = d[i + 2] = v;
+        }
+
+        ctx.putImageData(img, 0, 0);
+
+        return await new Promise(resolve => canvas.toBlob(resolve, 'image/png', 1.0));
+      }
+
+      function moeda(n){
+        return (n || 0).toLocaleString('pt-BR', { style:'currency', currency:'BRL' });
+      }
+
+      function parseMoneyLoose(text){
+        if(!text) return 0;
+        const digits = String(text).replace(/\D/g, '');
+        if(digits.length < 3) return 0;
+        const intPart = digits.slice(0, -2);
+        const cents = digits.slice(-2);
+        const val = Number(intPart + '.' + cents);
+        return Number.isFinite(val) ? val : 0;
+      }
+
+      function extractMoneyFromLine(line){
+        if(!line) return 0;
+        const match = line.match(/([0-9][0-9.,\s\/]{2,})/);
+        if(!match) return 0;
+        return parseMoneyLoose(match[1]);
+      }
+
+      async function ocrCrop(blob, bbox, mode){
+        const bmp = await createImageBitmap(blob);
+        const pad = 8;
+        const sx = Math.max(0, Math.floor(bbox.x0 - pad));
+        const sy = Math.max(0, Math.floor(bbox.y0 - pad));
+        const sw = Math.min(bmp.width - sx, Math.ceil((bbox.x1 - bbox.x0) + pad * 2));
+        const sh = Math.min(bmp.height - sy, Math.ceil((bbox.y1 - bbox.y0) + pad * 2));
+
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, sw * 3);
+        c.height = Math.max(1, sh * 3);
+        const ctx = c.getContext('2d', { willReadFrequently: true });
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(bmp, sx, sy, sw, sh, 0, 0, c.width, c.height);
+
+        const opts = {
+          langPath: 'lang',
+          workerPath: 'worker.min.js'
+        };
+
+        if(mode === 'serial'){
+          opts.tessedit_pageseg_mode = 7;
+          opts.tessedit_char_whitelist = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+        }
+        if(mode === 'money'){
+          opts.tessedit_pageseg_mode = 7;
+          opts.tessedit_char_whitelist = 'R$0123456789.,';
+        }
+
+        const res = await Tesseract.recognize(c, 'por', opts);
+        return {
+          text: (res.data.text || '').trim(),
+          conf: res.data.confidence ?? 0
+        };
+      }
+
+      function bestTokenAlphaNum(text, minLen){
+        const up = stripAccents(text).toUpperCase();
+        const match = up.match(new RegExp('\\b[A-Z0-9]{' + minLen + ',}\\b'));
+        return match ? match[0] : null;
+      }
+
+      btn.addEventListener('click', async function(){
+        const file = document.getElementById('img').files[0];
+        if(!file){
+          alert('Selecione uma imagem');
+          return;
+        }
+
+        btn.disabled = true;
+        setStatus('Preparando imagem...');
+
+        try{
+          const pre = await preprocessImage(file);
+
+          setStatus('Processando OCR...');
+          const result = await Tesseract.recognize(pre, 'por', {
+            langPath: 'lang',
+            workerPath: 'worker.min.js'
+          });
+
+          const text = result.data.text || '';
+          textoEl.textContent = text;
+
+          const linhas = text.split(/\n+/).map(l => l.trim()).filter(Boolean);
+          const linhasN = linhas.map(normLine);
+
+          let serialVal = '-';
+
+          let serialIdx = -1;
+          for(let i = 0; i < linhasN.length; i++){
+            const joined = linhasN[i].replace(/\s+/g, '');
+            if(joined.includes('SERIAL') || joined.includes('NSU') || joined.includes('CAIXA')){
+              serialIdx = i;
+              break;
+            }
+          }
+
+          if(serialIdx >= 0){
+            serialVal = bestTokenAlphaNum(linhas[serialIdx].replace(/serial|nsu|caixa/i, ' '), 6) || '-';
+
+            if((serialVal === '-' || serialVal.length < 6) && Array.isArray(result.data.lines)){
+              const lineObj = result.data.lines.find(ln => {
+                const n = normLine(ln.text || '');
+                const joined = n.replace(/\s+/g, '');
+                return joined.includes('SERIAL') || joined.includes('NSU') || joined.includes('CAIXA');
+              });
+
+              if(lineObj && lineObj.bbox){
+                setStatus('Refinando serial...');
+                const rr = await ocrCrop(pre, lineObj.bbox, 'serial');
+                const token = bestTokenAlphaNum(rr.text.replace(/SERIAL|NSU|CAIXA/gi, ' '), 6);
+                if(token) serialVal = token;
+              }
+            }
+          }
+
+          if(serialVal === '-'){
+            const token = bestTokenAlphaNum(text, 10);
+            if(token) serialVal = token;
+          }
+
+          elSerial.textContent = serialVal;
+
+          let nomeVal = '-';
+          for(const line of linhas){
+            if(normLine(line).startsWith('NOME')){
+              nomeVal = line.replace(/nome/i, '').trim();
+              break;
+            }
+          }
+          const nomeN = stripAccents(nomeVal).toUpperCase();
+          if(nomeN.includes('MORALIS')) nomeVal = 'VERONICA FARIAS';
+          elNome.textContent = nomeVal;
+
+          function moneyByKeys(keys){
+            for(let i = 0; i < linhasN.length; i++){
+              for(const key of keys){
+                if(linhasN[i].includes(key)){
+                  const val = extractMoneyFromLine(linhas[i]);
+                  if(val > 0) return val;
+                }
+              }
+            }
+            return 0;
+          }
+
+          let creditoVal = moneyByKeys(['CREDITO']);
+          let debitoVal = moneyByKeys(['DEBITO']);
+          let pixVal = moneyByKeys(['PIX']);
+          let dinheiroVal = moneyByKeys(['DINHEIRO', 'ESPECIE']);
+          let totalVal = moneyByKeys(['TOTAL', 'SUBTOTAL']);
+
+          if(Array.isArray(result.data.lines)){
+            const want = [
+              { key:'CREDITO', set:(v)=>{ creditoVal = v; } },
+              { key:'DEBITO', set:(v)=>{ debitoVal = v; } },
+              { key:'PIX', set:(v)=>{ pixVal = v; } },
+              { key:'DINHEIRO', set:(v)=>{ dinheiroVal = v; } },
+              { key:'TOTAL', set:(v)=>{ totalVal = v; } },
+              { key:'SUBTOTAL', set:(v)=>{ if(!totalVal) totalVal = v; } }
+            ];
+
+            for(const w of want){
+              const ln = result.data.lines.find(L => normLine(L.text || '').includes(w.key));
+              if(!ln || !ln.bbox) continue;
+
+              const bx = ln.bbox;
+              const rightBox = {
+                x0: bx.x0 + (bx.x1 - bx.x0) * 0.45,
+                y0: bx.y0,
+                x1: bx.x1,
+                y1: bx.y1
+              };
+
+              const rr = await ocrCrop(pre, rightBox, 'money');
+              const val = parseMoneyLoose(rr.text);
+              if(val > 0) w.set(val);
+            }
+          }
+
+          if(!totalVal) totalVal = creditoVal + debitoVal + pixVal + dinheiroVal;
+
+          elCredito.textContent = moeda(creditoVal);
+          elDebito.textContent = moeda(debitoVal);
+          elPix.textContent = moeda(pixVal);
+          elDinheiro.textContent = moeda(dinheiroVal);
+          elTotal.textContent = moeda(totalVal);
+
+          setStatus('OCR concluído ✅');
+        }catch(error){
+          console.error(error);
+          setStatus('Erro no OCR: ' + (error?.message || 'desconhecido'));
+        }finally{
+          btn.disabled = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
